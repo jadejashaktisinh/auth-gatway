@@ -9,22 +9,22 @@ import { ClientRequest, IncomingMessage, ServerResponse } from "http";
 import redisClient from "../config/redis.js";
 import type { Client } from "pg";
 import { insertProxyLog } from "../models/proxy-log.model.js";
+import type { Socket } from "net";
 
-const dynamicProxy = createProxyMiddleware({
+const dynamicProxySubdomain = createProxyMiddleware({
   target: "http://localhost:default-fallback", // Fallback target
   changeOrigin: true,
   router: async (req, res) => {
     const expressReq = req as unknown as Request & { vhost: string[] };
     const subdomain = expressReq.vhost[0] ?? "/inventory";
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const authHeader = req.headers["authorization"];
+    const token = authHeader && authHeader.split(" ")[1];
     let { route } = expressReq.params;
-
 
     if (!route) {
       handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: 'Route Missing',
-        message: 'Route is required.'
+        error: "Route Missing",
+        message: "Route is required.",
       });
       return process.env.FALLBACK_URL ?? "";
     }
@@ -32,16 +32,9 @@ const dynamicProxy = createProxyMiddleware({
     if (Array.isArray(route)) {
       route = route[0] ?? "/";
     }
-    req.headers['route'] = route;
-
-    const client = await db.select().from(clients).where(eq(clients.companyName, subdomain)).leftJoin(client_routes, and(eq(client_routes.client_id, clients.id), like(client_routes.client_path, `%${route}%`))).limit(1);
-    const row = client[0];
-
+    req.headers["route"] = route;
+    const row = await checkClientExists(subdomain, route, res!);
     if (!row) {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: 'Client Not Found',
-        message: 'The requested client was not found.'
-      });
       return process.env.FALLBACK_URL ?? "";
     }
     let log = {
@@ -52,13 +45,13 @@ const dynamicProxy = createProxyMiddleware({
       method: req.method ?? "",
       status_code: "404",
       response_time: "0",
-      error_message: ""
-    }
+      error_message: "",
+    };
 
     if (!row.client_routes) {
       handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: 'Route Not Found',
-        message: 'The requested route was not found.'
+        error: "Route Not Found",
+        message: "The requested route was not found.",
       });
       log.error_message = "Route Not Found";
       await insertProxyLog(log);
@@ -68,19 +61,12 @@ const dynamicProxy = createProxyMiddleware({
     // Both exist — safe to use
     const targetUrl = row.client_routes.target_url;
     log.target_url = targetUrl;
-    req.headers['targeturl'] = targetUrl;
-    req.headers['x-client-id'] = row.clients.id;
+    req.headers["targeturl"] = targetUrl;
+    req.headers["x-client-id"] = row.clients.id;
 
     const rateLimitKey = `route:${subdomain}:${route}`;
-
-    const requestRate = await redisClient.get(rateLimitKey);
-
-    if (requestRate && parseInt(requestRate) >= 100) {
-      
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: 'Rate Limit Exceeded',
-        message: 'You have exceeded the maximum number of requests allowed. Please try again later.'
-      });
+    const requestRate = await rateLimiter(rateLimitKey, res!);
+    if (!requestRate) {
       log.error_message = "Rate Limit Exceeded";
       await insertProxyLog(log);
       return process.env.FALLBACK_URL ?? "";
@@ -88,8 +74,8 @@ const dynamicProxy = createProxyMiddleware({
 
     if (!token || token.trim() === "") {
       handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: 'Token Missing',
-        message: 'Authorization token is required.'
+        error: "Token Missing",
+        message: "Authorization token is required.",
       });
       log.error_message = "Token Missing";
       await insertProxyLog(log);
@@ -98,8 +84,8 @@ const dynamicProxy = createProxyMiddleware({
 
     if (!subdomain || subdomain.trim() === "") {
       handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: 'Subdomain Missing',
-        message: 'Subdomain is required.'
+        error: "Subdomain Missing",
+        message: "Subdomain is required.",
       });
       log.error_message = "Subdomain Missing";
       await insertProxyLog(log);
@@ -108,88 +94,254 @@ const dynamicProxy = createProxyMiddleware({
 
     try {
       const decodedPayload = jwt.verify(token, process.env.JWT_SECRET ?? "");
-      const finalUrl = (targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`) + expressReq.baseUrl;
+      const finalUrl =
+        (targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`) +
+        expressReq.baseUrl;
       await redisClient.set(rateLimitKey, parseInt(requestRate ?? "0") + 1, {
-        EX: 120 // EX specifies expiration in seconds
+        EX: 120, // EX specifies expiration in seconds
       });
 
       return finalUrl; // Append the original request URL to the target URL
-
-    }
-    catch (error: any) {
+    } catch (error: any) {
       handleServerResponseType(res, {
-        error: 'Invalid Token',
-        message: error.message || 'The provided token is invalid.'
-      })
+        error: "Invalid Token",
+        message: error.message || "The provided token is invalid.",
+      });
       log.error_message = "Invalid Token";
       await insertProxyLog(log);
       return process.env.FALLBACK_URL ?? "";
     }
-
   },
   on: {
-    error: (err, req, res) => {
-      
-      const expressRes = res as unknown as Response;
-      const customeRes = expressRes as unknown as ServerResponse & { req?: ClientRequest };
-      // Send a custom error response to the client
-      if (res instanceof ServerResponse) {
-        res.writeHead(502, {
-          'Content-Type': 'application/json',
-        });
-        res.end(JSON.stringify({
-          error: 'Bad Gateway',
-          message: 'The upstream server could not be reached.'
-        }));
-
-        const log = {
-          client_id: req.headers['x-client-id'] as string,
-          method: customeRes.req?.method ?? "",
-          route: customeRes.req?.path ?? "",
-          target_url: req.headers['targeturl'] as string,
-          timestamp: new Date().toISOString(),
-          status_code: "502",
-          response_time: "0",
-          error_message: err.message ?? "",
-        }
-        const insertLog = insertProxyLog(log);
-
-      } else {
-        // 3. Handle WebSocket/Socket errors safely
-        console.error('Socket error occurred');
-        res.destroy(); // Safely close the socket connection
-      }
-    },
-    proxyRes: (proxyRes, req, res) => {
-
-      const customeProxyRes = proxyRes as unknown as IncomingMessage & {
-        req?: ClientRequest
-      };
-      const log = {
-        client_id: req.headers['x-client-id'] as string,
-        method: customeProxyRes.req?.method ?? "",
-        route: customeProxyRes.req?.path ?? "",
-        target_url: req.headers['targeturl'] as string,
-        timestamp: new Date().toISOString(),
-        status_code: customeProxyRes.statusCode?.toString() ?? "",
-        response_time: customeProxyRes.headers['x-response-time']?.toString() ?? "",
-        error_message: customeProxyRes.statusMessage ?? "",
-      };
-      insertProxyLog(log)
-    },
-  }
-
+    error: handleProxyError,
+    proxyRes: handleProxyResponse,
+  },
 });
 
+const dynamicProxySubdirectory = createProxyMiddleware({
+  target: "http://localhost:default-fallback", // Fallback target
+  changeOrigin: true,
+  router: async (req, res) => {
+    const expressReq = req as unknown as Request & { vhost: string[] };
+    const authHeader = req.headers["authorization"];
+    const token = authHeader && authHeader.split(" ")[1];
+    let { companyname, route } = expressReq.params;
 
-function handleServerResponseType(res: ServerResponse<IncomingMessage> | undefined, data: { error: string, message: string }) {
+    if (!companyname) {
+      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+        error: "Company name Missing",
+        message: "Company name is required.",
+      });
+      return process.env.FALLBACK_URL ?? "";
+    }
+    if (!route) {
+      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+        error: "Route Missing",
+        message: "Route is required.",
+      });
+      return process.env.FALLBACK_URL ?? "";
+    }
+
+    if (Array.isArray(route)) {
+      route = route[0] ?? "/";
+    }
+    req.headers["route"] = route;
+
+    const row = await checkClientExists(companyname as string, route, res!);
+    if (!row) {
+      return process.env.FALLBACK_URL ?? "";
+    }
+    let log = {
+      client_id: row.clients.id,
+      route: route,
+      target_url: "",
+      timestamp: new Date().toISOString(),
+      method: req.method ?? "",
+      status_code: "404",
+      response_time: "0",
+      error_message: "",
+    };
+
+    if (!row.client_routes) {
+      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+        error: "Route Not Found",
+        message: "The requested route was not found.",
+      });
+      log.error_message = "Route Not Found";
+      await insertProxyLog(log);
+      return process.env.FALLBACK_URL ?? "";
+    }
+
+    // Both exist — safe to use
+    const targetUrl = row.client_routes.target_url;
+    log.target_url = targetUrl;
+    req.headers["targeturl"] = targetUrl;
+    req.headers["x-client-id"] = row.clients.id;
+
+    const rateLimitKey = `route:${companyname}:${route}`;
+    const requestRate = await rateLimiter(rateLimitKey, res!);
+    if (!requestRate) {
+      log.error_message = "Rate Limit Exceeded";
+      await insertProxyLog(log);
+      return process.env.FALLBACK_URL ?? "";
+    }
+
+    if (!token || token.trim() === "") {
+      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+        error: "Token Missing",
+        message: "Authorization token is required.",
+      });
+      log.error_message = "Token Missing";
+      await insertProxyLog(log);
+      return process.env.FALLBACK_URL ?? "";
+    }
+
+    try {
+      const decodedPayload = jwt.verify(token, process.env.JWT_SECRET ?? "");
+      console.log("expressReq.baseUrl =>", expressReq.baseUrl);
+      console.log("company name =>", companyname);
+      let baseulr = expressReq.baseUrl.replace("/" + companyname, "");
+      console.log("baseulr =>", baseulr);
+      const finalUrl =
+        (targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`) +
+        baseulr;
+      await redisClient.set(rateLimitKey, parseInt(requestRate ?? "0") + 1, {
+        EX: 120, // EX specifies expiration in seconds
+      });
+      console.log("finalUrl => ", finalUrl);
+      return finalUrl; // Append the original request URL to the target URL
+    } catch (error: any) {
+      handleServerResponseType(res, {
+        error: "Invalid Token",
+        message: error.message || "The provided token is invalid.",
+      });
+      log.error_message = "Invalid Token";
+      await insertProxyLog(log);
+      return process.env.FALLBACK_URL ?? "";
+    }
+  },
+  on: {
+    error: handleProxyError,
+    proxyRes: handleProxyResponse,
+  },
+});
+
+function handleServerResponseType(
+  res: ServerResponse<IncomingMessage> | undefined,
+  data: { error: string; message: string },
+) {
   if (res instanceof ServerResponse) {
     res.writeHead(502, {
-      'Content-Type': 'application/json',
+      "Content-Type": "application/json",
     });
     res.end(JSON.stringify(data));
   }
 }
 
+async function checkClientExists(
+  companyName: string,
+  route: string,
+  res: ServerResponse<IncomingMessage>,
+) {
+  const client = await db
+    .select()
+    .from(clients)
+    .where(eq(clients.companyName, companyName))
+    .leftJoin(
+      client_routes,
+      and(
+        eq(client_routes.client_id, clients.id),
+        like(client_routes.client_path, `%${route}%`),
+      ),
+    )
+    .limit(1);
+  const row = client[0];
 
-export default dynamicProxy;
+  if (!row) {
+    handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+      error: "Client Not Found",
+      message: "The requested client was not found.",
+    });
+    return false;
+  }
+  return row;
+}
+
+async function rateLimiter(
+  rateLimitKey: string,
+  res: ServerResponse<IncomingMessage>,
+) {
+  const requestRate = await redisClient.get(rateLimitKey);
+
+  if (requestRate && parseInt(requestRate) >= 100) {
+    handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+      error: "Rate Limit Exceeded",
+      message:
+        "You have exceeded the maximum number of requests allowed. Please try again later.",
+    });
+    return false;
+  }
+  return requestRate;
+}
+
+function handleProxyError(
+  err: Error,
+  req: IncomingMessage,
+  res: ServerResponse<IncomingMessage> | Socket,
+) {
+  const expressRes = res as unknown as Response;
+  const customeRes = expressRes as unknown as ServerResponse & {
+    req?: ClientRequest;
+  };
+  // Send a custom error response to the client
+  if (res instanceof ServerResponse) {
+    res.writeHead(502, {
+      "Content-Type": "application/json",
+    });
+    res.end(
+      JSON.stringify({
+        error: "Bad Gateway",
+        message: "The upstream server could not be reached.",
+      }),
+    );
+
+    const log = {
+      client_id: req.headers["x-client-id"] as string,
+      method: customeRes.req?.method ?? "",
+      route: customeRes.req?.path ?? "",
+      target_url: req.headers["targeturl"] as string,
+      timestamp: new Date().toISOString(),
+      status_code: "502",
+      response_time: "0",
+      error_message: err.message ?? "",
+    };
+    const insertLog = insertProxyLog(log);
+  } else {
+    // 3. Handle WebSocket/Socket errors safely
+    console.error("Socket error occurred");
+    res.destroy(); // Safely close the socket connection
+  }
+}
+
+function handleProxyResponse(
+  proxyRes: IncomingMessage,
+  req: IncomingMessage,
+  res: ServerResponse<IncomingMessage>,
+) {
+  const customeProxyRes = proxyRes as unknown as IncomingMessage & {
+    req?: ClientRequest;
+  };
+  const log = {
+    client_id: req.headers["x-client-id"] as string,
+    method: customeProxyRes.req?.method ?? "",
+    route: customeProxyRes.req?.path ?? "",
+    target_url: req.headers["targeturl"] as string,
+    timestamp: new Date().toISOString(),
+    status_code: customeProxyRes.statusCode?.toString() ?? "",
+    response_time: customeProxyRes.headers["x-response-time"]?.toString() ?? "",
+    error_message: customeProxyRes.statusMessage ?? "",
+  };
+  insertProxyLog(log);
+}
+
+export { dynamicProxySubdomain, dynamicProxySubdirectory };
