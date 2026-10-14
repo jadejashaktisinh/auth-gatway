@@ -10,7 +10,7 @@ const app = express();
 const proxyApp = express();
 proxyApp.use("/*route", dynamicProxy);
 
-app.use(vhost("*" + process.env.DOMAIN, proxyApp));
+app.use(vhost("*." + process.env.DOMAIN, proxyApp));
 
 const port = 3000;
 
