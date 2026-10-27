@@ -1,7 +1,6 @@
 import { db } from "../db/db.js";
 import { proxy_logs } from "../db/schema/schema.js";
 
-
 type ProxyLogData = {
   client_id: string;
   method: string;
@@ -13,8 +12,10 @@ type ProxyLogData = {
   error_message?: string | null;
 };
 
-export async function insertProxyLog(proxyLogData: ProxyLogData): Promise<boolean> {
-   const log =  await db.insert(proxy_logs).values(proxyLogData).returning();
+export async function insertProxyLog(
+  proxyLogData: ProxyLogData,
+): Promise<boolean> {
+  const log = await db.insert(proxy_logs).values(proxyLogData).returning();
 
-    return !!log;
+  return !!log;
 }

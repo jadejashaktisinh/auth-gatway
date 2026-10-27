@@ -17,100 +17,7 @@ const dynamicProxySubdomain = createProxyMiddleware({
   router: async (req, res) => {
     const expressReq = req as unknown as Request & { vhost: string[] };
     const subdomain = expressReq.vhost[0] ?? "/inventory";
-    const authHeader = req.headers["authorization"];
-    const token = authHeader && authHeader.split(" ")[1];
-    let { route } = expressReq.params;
-
-    if (!route) {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: "Route Missing",
-        message: "Route is required.",
-      });
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    if (Array.isArray(route)) {
-      route = route[0] ?? "/";
-    }
-    req.headers["route"] = route;
-    const row = await checkClientExists(subdomain, route, res!);
-    if (!row) {
-      return process.env.FALLBACK_URL ?? "";
-    }
-    let log = {
-      client_id: row.clients.id,
-      route: route,
-      target_url: "",
-      timestamp: new Date().toISOString(),
-      method: req.method ?? "",
-      status_code: "404",
-      response_time: "0",
-      error_message: "",
-    };
-
-    if (!row.client_routes) {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: "Route Not Found",
-        message: "The requested route was not found.",
-      });
-      log.error_message = "Route Not Found";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    // Both exist — safe to use
-    const targetUrl = row.client_routes.target_url;
-    log.target_url = targetUrl;
-    req.headers["targeturl"] = targetUrl;
-    req.headers["x-client-id"] = row.clients.id;
-
-    const rateLimitKey = `route:${subdomain}:${route}`;
-    const requestRate = await rateLimiter(rateLimitKey, res!);
-    if (!requestRate) {
-      log.error_message = "Rate Limit Exceeded";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    if (!token || token.trim() === "") {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: "Token Missing",
-        message: "Authorization token is required.",
-      });
-      log.error_message = "Token Missing";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    if (!subdomain || subdomain.trim() === "") {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: "Subdomain Missing",
-        message: "Subdomain is required.",
-      });
-      log.error_message = "Subdomain Missing";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    try {
-      const decodedPayload = jwt.verify(token, process.env.JWT_SECRET ?? "");
-      const finalUrl =
-        (targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`) +
-        expressReq.baseUrl;
-      await redisClient.set(rateLimitKey, parseInt(requestRate ?? "0") + 1, {
-        EX: 120, // EX specifies expiration in seconds
-      });
-
-      return finalUrl; // Append the original request URL to the target URL
-    } catch (error: any) {
-      handleServerResponseType(res, {
-        error: "Invalid Token",
-        message: error.message || "The provided token is invalid.",
-      });
-      log.error_message = "Invalid Token";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
+    return handleProxyRouter(subdomain, req, res);
   },
   on: {
     error: handleProxyError,
@@ -123,108 +30,125 @@ const dynamicProxySubdirectory = createProxyMiddleware({
   changeOrigin: true,
   router: async (req, res) => {
     const expressReq = req as unknown as Request & { vhost: string[] };
-    const authHeader = req.headers["authorization"];
-    const token = authHeader && authHeader.split(" ")[1];
-    let { companyname, route } = expressReq.params;
+    let { companyname } = expressReq.params;
 
     if (!companyname) {
       handleServerResponseType(res as ServerResponse<IncomingMessage>, {
         error: "Company name Missing",
         message: "Company name is required.",
       });
-      return process.env.FALLBACK_URL ?? "";
+      return process.env.F2ALLBACK_URL ?? "";
     }
-    if (!route) {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: "Route Missing",
-        message: "Route is required.",
-      });
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    if (Array.isArray(route)) {
-      route = route[0] ?? "/";
-    }
-    req.headers["route"] = route;
-
-    const row = await checkClientExists(companyname as string, route, res!);
-    if (!row) {
-      return process.env.FALLBACK_URL ?? "";
-    }
-    let log = {
-      client_id: row.clients.id,
-      route: route,
-      target_url: "",
-      timestamp: new Date().toISOString(),
-      method: req.method ?? "",
-      status_code: "404",
-      response_time: "0",
-      error_message: "",
-    };
-
-    if (!row.client_routes) {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: "Route Not Found",
-        message: "The requested route was not found.",
-      });
-      log.error_message = "Route Not Found";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    // Both exist — safe to use
-    const targetUrl = row.client_routes.target_url;
-    log.target_url = targetUrl;
-    req.headers["targeturl"] = targetUrl;
-    req.headers["x-client-id"] = row.clients.id;
-
-    const rateLimitKey = `route:${companyname}:${route}`;
-    const requestRate = await rateLimiter(rateLimitKey, res!);
-    if (!requestRate) {
-      log.error_message = "Rate Limit Exceeded";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    if (!token || token.trim() === "") {
-      handleServerResponseType(res as ServerResponse<IncomingMessage>, {
-        error: "Token Missing",
-        message: "Authorization token is required.",
-      });
-      log.error_message = "Token Missing";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
-
-    try {
-      const decodedPayload = jwt.verify(token, process.env.JWT_SECRET ?? "");
-      console.log("expressReq.baseUrl =>", expressReq.baseUrl);
-      console.log("company name =>", companyname);
-      let baseulr = expressReq.baseUrl.replace("/" + companyname, "");
-      console.log("baseulr =>", baseulr);
-      const finalUrl =
-        (targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`) +
-        baseulr;
-      await redisClient.set(rateLimitKey, parseInt(requestRate ?? "0") + 1, {
-        EX: 120, // EX specifies expiration in seconds
-      });
-      console.log("finalUrl => ", finalUrl);
-      return finalUrl; // Append the original request URL to the target URL
-    } catch (error: any) {
-      handleServerResponseType(res, {
-        error: "Invalid Token",
-        message: error.message || "The provided token is invalid.",
-      });
-      log.error_message = "Invalid Token";
-      await insertProxyLog(log);
-      return process.env.FALLBACK_URL ?? "";
-    }
+    console.log("request callled");
+    return handleProxyRouter(companyname as string, req, res);
   },
   on: {
     error: handleProxyError,
     proxyRes: handleProxyResponse,
   },
 });
+
+async function handleProxyRouter(
+  extracted: string,
+  req: IncomingMessage,
+  res: ServerResponse<IncomingMessage> | undefined,
+) {
+  const expressReq = req as unknown as Request & { vhost: string[] };
+  const authHeader = req.headers["authorization"];
+  const token = authHeader && authHeader.split(" ")[1];
+  let { route } = expressReq.params;
+  console.log("check route");
+  if (!route) {
+    handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+      error: "Route Missing",
+      message: "Route is required.",
+    });
+    return process.env.FALLBACK_URL ?? "";
+  }
+
+  if (Array.isArray(route)) {
+    route = route[0] ?? "/";
+  }
+  req.headers["route"] = route;
+  const row = await checkClientExists(extracted, route, res!);
+  if (!row) {
+    return process.env.FALLBACK_URL ?? "";
+  }
+  let log = {
+    client_id: row.clients.id,
+    route: route,
+    target_url: "",
+    timestamp: new Date().toISOString(),
+    method: req.method ?? "",
+    status_code: "404",
+    response_time: "0",
+    error_message: "",
+  };
+
+  if (!row.client_routes) {
+    handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+      error: "Route Not Found",
+      message: "The requested route was not found.",
+    });
+    log.error_message = "Route Not Found";
+    await insertProxyLog(log);
+    return process.env.FALLBACK_URL ?? "";
+  }
+
+  // Both exist — safe to use
+  const targetUrl = row.client_routes.target_url;
+  log.target_url = targetUrl;
+  req.headers["targeturl"] = targetUrl;
+  req.headers["x-client-id"] = row.clients.id;
+  console.log("check rate liit");
+
+  const rateLimitKey = `route:${extracted}:${route}`;
+  console.log("reate limit key =>", rateLimitKey);
+  const requestRate = await rateLimiter(rateLimitKey, res!);
+  if (!requestRate) {
+    log.error_message = "Rate Limit Exceeded";
+    await insertProxyLog(log);
+    return process.env.FALLBACK_URL ?? "";
+  }
+  console.log("check token");
+
+  if (!token || token.trim() === "") {
+    handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+      error: "Token Missing",
+      message: "Authorization token is required.",
+    });
+    log.error_message = "Token Missing";
+    await insertProxyLog(log);
+    return process.env.FALLBACK_URL ?? "";
+  }
+  console.log("check ext");
+  if (!extracted || extracted.trim() === "") {
+    handleServerResponseType(res as ServerResponse<IncomingMessage>, {
+      error: "Subdomain Missing",
+      message: "Subdomain is required.",
+    });
+    log.error_message = "Subdomain Missing";
+    await insertProxyLog(log);
+    return process.env.FALLBACK_URL ?? "";
+  }
+
+  try {
+    console.log("in tyr block");
+    const decodedPayload = jwt.verify(token, process.env.JWT_SECRET ?? "");
+    const finalUrl =
+      (targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`) +
+      expressReq.baseUrl;
+    return finalUrl; // Append the original request URL to the target URL
+  } catch (error: any) {
+    handleServerResponseType(res, {
+      error: "Invalid Token",
+      message: error.message || "The provided token is invalid.",
+    });
+    log.error_message = "Invalid Token";
+    await insertProxyLog(log);
+    return process.env.FALLBACK_URL ?? "";
+  }
+}
 
 function handleServerResponseType(
   res: ServerResponse<IncomingMessage> | undefined,
@@ -272,16 +196,19 @@ async function rateLimiter(
   res: ServerResponse<IncomingMessage>,
 ) {
   const requestRate = await redisClient.get(rateLimitKey);
-
+  console.log("request rate => ", requestRate);
   if (requestRate && parseInt(requestRate) >= 100) {
     handleServerResponseType(res as ServerResponse<IncomingMessage>, {
       error: "Rate Limit Exceeded",
       message:
         "You have exceeded the maximum number of requests allowed. Please try again later.",
     });
+    console.log("return false");
     return false;
   }
-  return requestRate;
+  console.log("return rate");
+
+  return requestRate ?? "0";
 }
 
 function handleProxyError(
