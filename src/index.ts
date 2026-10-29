@@ -21,7 +21,7 @@ const port = 3000;
 app.use(express.json());
 app.use("/", clientRoutes);
 app.use("/", tokenRoutes);
-app.use("/:companyname/*route", ProxyMiddleware, dynamicProxySubdirectory);
+app.use("/p/:companyname/*route", ProxyMiddleware, dynamicProxySubdirectory);
 
 app.listen(port, () => {
   console.log(`Example app listening on port ${port}`);
