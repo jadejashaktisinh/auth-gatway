@@ -49,7 +49,7 @@ async function handleProxyRouter(
   }
   let endpoint = expressReq.baseUrl;
   if (!expressReq.vhost) {
-    endpoint = endpoint.replace(extracted + "/", "");
+    endpoint = endpoint.replace("p/" + extracted + "/", "");
   }
   const finalUrl =
     (targetUrl.startsWith("http") ? targetUrl : `https://${targetUrl}`) +

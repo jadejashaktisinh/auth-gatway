@@ -72,6 +72,7 @@ export async function ProxyMiddleware(
   const rateLimitKey = `route:${extracted}:${route}`;
 
   const requestRate = await rateLimiter(rateLimitKey, res);
+  console.log("requestRate => ", requestRate);
   if (!requestRate) {
     return await rejectRequest(
       "Rate Limit Exceeded",
@@ -103,6 +104,7 @@ export async function ProxyMiddleware(
 
   try {
     jwt.verify(token, process.env.JWT_SECRET ?? "");
+    await redisClient.incr(rateLimitKey);
     next();
     // Append the original request URL to the target URL
   } catch (error: any) {
@@ -143,6 +145,12 @@ async function rateLimiter(
   const requestRate = await redisClient.get(rateLimitKey);
   if (requestRate && parseInt(requestRate) >= 100) {
     return false;
+  }
+  if (!requestRate) {
+    await redisClient.set(rateLimitKey, "0", {
+      EX: 60,
+      NX: true,
+    });
   }
   return requestRate ?? "0";
 }
